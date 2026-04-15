@@ -1,0 +1,231 @@
+%{
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ---- list type ---- */
+typedef struct {
+    int labels[100];
+    int size;
+} List;
+
+List makelist(int label) {
+    List l; l.size = 0;
+    l.labels[l.size++] = label;
+    return l;
+}
+
+List merge(List l1, List l2) {
+    List l; l.size = 0;
+    for(int i=0;i<l1.size;i++) l.labels[l.size++]=l1.labels[i];
+    for(int i=0;i<l2.size;i++) l.labels[l.size++]=l2.labels[i];
+    return l;
+}
+
+void backpatch(List l, int label) {
+    printf("Backpatch : Resolve targets in ");
+    for(int i=0;i<l.size;i++){
+        printf("%d",l.labels[i]);
+        if(i<l.size-1) printf(", ");
+    }
+    printf(", With label : %d \n", label);
+}
+
+void printlist(List l, char *name) {
+    printf("%slist after processing ", name);
+    for(int i=0;i<l.size;i++){
+        printf("%d",l.labels[i]);
+        if(i<l.size-1) printf(", ");
+    }
+    printf(", \n");
+}
+
+/* ---- IC generation ---- */
+int nextstat;
+int tempcount = 0;
+
+char* newtemp(){
+    char *buf=malloc(10);
+    sprintf(buf,"t%d",++tempcount);
+    return buf;
+}
+
+void emit(char *s){
+    printf("%d: %s\n", nextstat++, s);
+}
+
+int yylex(void);
+void yyerror(char *s){ fprintf(stderr,"Error: %s\n",s); }
+extern char *yytext;
+%}
+
+/* value types */
+%union {
+    char  *sval;    /* for ID place */
+    int    ival;    /* for M.stat */
+    struct {
+        char *place;
+        int truelist[100];  int tsize;
+        int falselist[100]; int fsize;
+    } bval;         /* for B attributes */
+}
+
+%token <sval> ID
+%token TRUE FALSE
+%token AND OR NOT
+%token LT EQ
+%token PLUS TIMES
+
+%type <sval>  E
+%type <ival>  M
+%type <bval>  B
+
+/* precedence */
+%left OR
+%left AND
+%right NOT
+%left LT EQ
+%left PLUS
+%left TIMES
+
+%%
+
+program :
+    B
+    {
+        /* print final true and false lists */
+        List tl, fl;
+        tl.size = $1.tsize;
+        for(int i=0;i<tl.size;i++) tl.labels[i]=$1.truelist[i];
+        fl.size = $1.fsize;
+        for(int i=0;i<fl.size;i++) fl.labels[i]=$1.falselist[i];
+        printlist(tl, " True");
+        printlist(fl, " False");
+    }
+    ;
+
+M :
+    /* empty */
+    {
+        $$ = nextstat;   /* record current label */
+    }
+    ;
+
+B :
+    B OR M B
+    {
+        /* backpatch B1.falselist to M.stat */
+        List fl;
+        fl.size = $1.fsize;
+        for(int i=0;i<fl.size;i++) fl.labels[i]=$1.falselist[i];
+        backpatch(fl, $3);
+
+        /* truelist = merge(B1.true, B2.true) */
+        $$.tsize = 0;
+        for(int i=0;i<$1.tsize;i++) $$.truelist[$$.tsize++]=$1.truelist[i];
+        for(int i=0;i<$4.tsize;i++) $$.truelist[$$.tsize++]=$4.truelist[i];
+
+        /* falselist = B2.false */
+        $$.fsize = $4.fsize;
+        for(int i=0;i<$4.fsize;i++) $$.falselist[i]=$4.falselist[i];
+    }
+    | B AND M B
+    {
+        /* backpatch B1.truelist to M.stat */
+        List tl;
+        tl.size = $1.tsize;
+        for(int i=0;i<tl.size;i++) tl.labels[i]=$1.truelist[i];
+        backpatch(tl, $3);
+
+        /* falselist = merge(B1.false, B2.false) */
+        $$.fsize = 0;
+        for(int i=0;i<$1.fsize;i++) $$.falselist[$$.fsize++]=$1.falselist[i];
+        for(int i=0;i<$4.fsize;i++) $$.falselist[$$.fsize++]=$4.falselist[i];
+
+        /* truelist = B2.true */
+        $$.tsize = $4.tsize;
+        for(int i=0;i<$4.tsize;i++) $$.truelist[i]=$4.truelist[i];
+    }
+    | NOT B
+    {
+        /* swap true and false lists */
+        $$.tsize = $2.fsize;
+        for(int i=0;i<$2.fsize;i++) $$.truelist[i]=$2.falselist[i];
+        $$.fsize = $2.tsize;
+        for(int i=0;i<$2.tsize;i++) $$.falselist[i]=$2.truelist[i];
+    }
+    | '(' B ')'
+    {
+        $$ = $2;
+    }
+    | E LT E
+    {
+        char buf[100];
+        $$.tsize = 0; $$.fsize = 0;
+        $$.truelist[$$.tsize++]  = nextstat;
+        $$.falselist[$$.fsize++] = nextstat + 1;
+        sprintf(buf, "if %s<%s goto ___", $1, $3);
+        emit(buf);
+        emit("goto ___");
+    }
+    | E EQ E
+    {
+        char buf[100];
+        $$.tsize = 0; $$.fsize = 0;
+        $$.truelist[$$.tsize++]  = nextstat;
+        $$.falselist[$$.fsize++] = nextstat + 1;
+        sprintf(buf, "if %s==%s goto ___", $1, $3);
+        emit(buf);
+        emit("goto ___");
+    }
+    | TRUE
+    {
+        $$.tsize = 0; $$.fsize = 0;
+        $$.truelist[$$.tsize++] = nextstat;
+        emit("goto ___");
+    }
+    | FALSE
+    {
+        $$.tsize = 0; $$.fsize = 0;
+        $$.falselist[$$.fsize++] = nextstat;
+        emit("goto ___");
+    }
+    | E
+    {
+        char buf[100];
+        $$.tsize = 0; $$.fsize = 0;
+        $$.truelist[$$.tsize++]  = nextstat;
+        $$.falselist[$$.fsize++] = nextstat + 1;
+        sprintf(buf, "if %s goto ___", $1.place);
+        emit(buf);
+        emit("goto ___");
+    }
+    ;
+
+E :
+    E PLUS E
+    {
+        char *t = newtemp();
+        char buf[100];
+        sprintf(buf, "%s := %s + %s", t, $1, $3);
+        emit(buf);
+        $$ = t;
+    }
+    | E TIMES E
+    {
+        char *t = newtemp();
+        char buf[100];
+        sprintf(buf, "%s := %s * %s", t, $1, $3);
+        emit(buf);
+        $$ = t;
+    }
+    | ID   { $$ = $1; }
+    ;
+
+%%
+
+int main(){
+    scanf("%d", &nextstat);
+    yyparse();
+    return 0;
+}
